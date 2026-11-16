@@ -10,8 +10,10 @@ Step 2  Test each candidate on the released model: insert the guard block into c
         opposite verb), compared with a placebo block of the same shape on the same functions.
         Two independent samples of functions (the second one is the check); 95% bootstrap intervals.
 Step 3  Look at the rows themselves: remove the guard from every row that has one, summarize again, and
-        count how often the given docstring names the opposite action of the model's summary.
-Step 4  Write submission.csv, flagging the rows that contain the guard chosen from Step 2.
+        count how often the given docstring names the opposite action of the model's summary, and how
+        often the model's summary still uses the docstring's verb with the guard and without it.
+Step 4  Write submission.csv. FLAG = "all" flags every row that contains one of the guard blocks;
+        FLAG = "best" flags only the rows with the guard that has the largest effect in Step 2.
 
 Google Colab:
     1. Runtime > Change runtime type > GPU (CPU also works, but slower).
@@ -41,7 +43,8 @@ MIN_COUNT = 10                # a guard line must occur at least this often to b
 N_FUNCTIONS = 200             # functions per sample in Step 2
 SEEDS = [0, 1]                # sample 1 = estimate, sample 2 = check
 PLACEBO = ("if 0 > 1:", 'print("Error")')   # same shape as a guard block, not taken from the data
-CHOSEN_GUARD = None           # None = flag the guard with the largest effect in Step 2; or set it by hand
+FLAG = "all"                  # "all": rows with any guard block (2nd submission); "best": only the guard with
+                              # the largest Step 2 effect (1st submission, public score 0.16)
 
 # Action verbs in antonym pairs, with their word forms. The pairs are the verbs that start the
 # docstrings of the guard rows; Step 1 prints those first words so this list can be checked.
@@ -78,6 +81,11 @@ def first_verb(text):
         if word in LEMMA:
             return LEMMA[word]
     return None
+
+
+def contains_verb(text, verb):
+    """True if `text` contains any word form of the action verb `verb` (e.g. "removes" for "remove")."""
+    return verb is not None and any(LEMMA.get(w) == verb for w in re.findall(r"[a-z]+", str(text).lower()))
 
 
 def func_name(code):
@@ -265,15 +273,24 @@ def step3(train, guards, summarize):
     print(f"  {'block':22s} {'n':>4s}  {'docstring verb differs, %':28s} docstring verb is the opposite, %")
     for g, grp in k.groupby("guard"):
         print(f"  {g:22s} {len(grp):4d}  {mean_ci(grp.different):28s} {mean_ci(grp.opposite)}")
+
+    # Does the model only repeat the docstring's verb while the guard is there? If so, the docstring is not
+    # what the model says about the code itself, i.e. the docstring was changed together with the guard.
+    rows["verb_with_guard"] = [contains_verb(s, v) for s, v in zip(rows.gen, rows.doc_verb)]
+    rows["verb_without_guard"] = [contains_verb(s, v) for s, v in zip(rows.summary_without_guard, rows.doc_verb)]
+    print("\nmodel summary contains the docstring's verb (with guard = outputs_train.csv; without = guard removed):")
+    print(f"  {'block':22s} {'n':>4s}  {'with guard, %':22s} without guard, %")
+    for g, grp in rows.groupby("guard"):
+        print(f"  {g:22s} {len(grp):4d}  {mean_ci(grp.verb_with_guard):22s} {mean_ci(grp.verb_without_guard)}")
     print("\nexamples (docstring | model with guard | model without guard):")
     for g in guards:
         for _, r in rows[rows.guard == g].head(5).iterrows():
             print(f"  [{g}] {func_name(r.code)}\n      {r.docstring[:80]}\n      {r.gen[:80]}\n      {r.summary_without_guard[:80]}")
 
 
-def step4(train, guards, guard):
-    print(f"\n=== Step 4: flag rows containing {guard!r} / {guards[guard]!r} ===")
-    has_block = train.code.apply(lambda c: guard in c and find_block(c, guard, guards[guard]) >= 0)
+def step4(train, guards, chosen):
+    print(f"\n=== Step 4: flag rows containing any of these guard blocks: {chosen} ===")
+    has_block = train.code.apply(lambda c: any(g in c and find_block(c, g, guards[g]) >= 0 for g in chosen))
     sub = pd.DataFrame({"id": train.id, "label": has_block.astype(int)})
     sample = pd.read_csv(SAMPLE, dtype={"id": str}, keep_default_na=False)
     assert list(sub.id) == list(sample.id), "ids differ from sample_submission.csv"
@@ -297,7 +314,7 @@ def main():
     mean_effect = {g: np.mean([e[g] for e in effects]) for g in guards}
     print("\nopposite-verb effect over placebo, mean of the samples:",
           {g: round(100 * v, 1) for g, v in mean_effect.items()})
-    chosen = CHOSEN_GUARD or max(mean_effect, key=mean_effect.get)
+    chosen = list(guards) if FLAG == "all" else [max(mean_effect, key=mean_effect.get)]
     step4(train, guards, chosen)
 
 
